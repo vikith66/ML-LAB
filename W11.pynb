@@ -1,0 +1,180 @@
+# =======================================================
+# MANIPAL INSTITUTE OF TECHNOLOGY
+# MCA 5141 - MACHINE LEARNING LAB
+# END-SEM EXAM SOLUTION | OCT 2025
+# MAX MARKS: 40
+# =======================================================
+
+import pandas as pd
+import numpy as np
+import warnings
+warnings.filterwarnings('ignore')
+
+from sklearn.impute import KNNImputer
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.model_selection import train_test_split
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.tree import DecisionTreeRegressor
+from sklearn.feature_selection import RFE
+from sklearn.metrics import r2_score, mean_squared_error, roc_auc_score, precision_score, recall_score
+from statsmodels.stats.outliers_influence import variance_inflation_factor
+
+# =======================================================
+# PHASE 1: Data Preparation & Advanced Feature Engineering
+# Writeup: 10 | Execution: 5
+# =======================================================
+
+print("PHASE 1: DATA PREPARATION & FEATURE ENGINEERING\n" + "-"*60)
+
+# --- Q1: Load dataset for 2012–2025 ---
+df = pd.read_csv('water_health_data.csv')
+df = df[df['Year'].between(2012, 2025)].copy()
+print(f"Q1: Loaded {df.shape[0]} rows (2012–2025)")
+
+# --- Q2: Create 4 Engineered Features ---
+df['Water_Stress_Index'] = (df['Contaminant_Level'] + df['Nitrate_Level'] + df['Lead_Concentration']) / (df['Dissolved_Oxygen'] + 1e-6)
+df['Health_Vulnerability_Score'] = (df['Diarrheal_Cases'] + df['Cholera_Cases'] + df['Typhoid_Cases']) / (df['Healthcare_Access_Index'] + 1)
+df['Eco_Sanitation_Index'] = (df['Access_to_Clean_Water'] * df['Sanitation_Coverage']) / (1 + df['Turbidity'])
+df['Composite_Risk_Score'] = df['Water_Stress_Index'] + df['Health_Vulnerability_Score'] - df['Eco_Sanitation_Index']
+
+print("Q2: 4 engineered features created:")
+print(df[['Water_Stress_Index','Health_Vulnerability_Score','Eco_Sanitation_Index','Composite_Risk_Score']].head(1).T)
+
+# --- Q3: KNN Imputer + Min-Max Scaling ---
+imputer = KNNImputer(n_neighbors=5)
+num_cols = df.select_dtypes(include=np.number).columns
+df[num_cols] = imputer.fit_transform(df[num_cols])
+
+scaler = MinMaxScaler()
+df[num_cols] = scaler.fit_transform(df[num_cols])
+print("Q3: KNN Imputation (k=5) + Min-Max Scaling (0–1) applied\n")
+
+
+# =======================================================
+# PHASE 2: Multicollinearity & KNN-Based Feature Selection
+# Writeup: 5 | Execution: 2
+# =======================================================
+
+print("PHASE 2: FEATURE SELECTION\n" + "-"*60)
+
+# --- Q1: KNN Classifier → Low/Medium/High Risk ---
+risk_labels = pd.qcut(df['Composite_Risk_Score'], q=3, labels=['Low', 'Medium', 'High'])
+X_knn = df.drop(columns=['Country','Region','Year','Water_Source_Type','Water_Treatment_Method','Composite_Risk_Score'], errors='ignore')
+
+knn = KNeighborsClassifier(n_neighbors=5)
+knn.fit(X_knn, risk_labels)
+df['Health_Risk_Class'] = knn.predict(X_knn)
+print(f"Q1: KNN Risk Classes → {df['Health_Risk_Class'].value_counts().to_dict()}")
+
+# --- Q2: VIF + RFE with Decision Tree ---
+def compute_vif(X):
+    vif = pd.DataFrame()
+    vif["Feature"] = X.columns
+    vif["VIF"] = [variance_inflation_factor(X.values, i) for i in range(X.shape[1])]
+    return vif
+
+vif_result = compute_vif(X_knn)
+print(f"Q2: Features with VIF > 5: {vif_result[vif_result['VIF'] > 5]['Feature'].tolist()}")
+
+# RFE: Select top 8 features
+y_rfe = df['Composite_Risk_Score']
+rfe_selector = RFE(estimator=DecisionTreeRegressor(random_state=42), n_features_to_select=8)
+rfe_selector.fit(X_knn, y_rfe)
+selected_features = X_knn.columns[rfe_selector.support_].tolist()
+print(f"Q2: RFE Selected (8): {selected_features}\n")
+
+
+# =======================================================
+# PHASE 3: Multi-Model Training & Conflict Resolution
+# Execution: 13
+# =======================================================
+
+print("PHASE 3: MODEL TRAINING & EVALUATION\n" + "-"*60)
+
+X = df[selected_features]
+
+# --- Model 1: Linear Regression → Eco_Sanitation_Index ---
+y_eco = df['Eco_Sanitation_Index']
+X_train, X_test, y_train_eco, y_test_eco = train_test_split(X, y_eco, test_size=0.2, random_state=42)
+
+lr_model = LinearRegression()
+lr_model.fit(X_train, y_train_eco)
+pred_eco = lr_model.predict(X_test)
+
+r2_eco = r2_score(y_test_eco, pred_eco)
+rmse_eco = mean_squared_error(y_test_eco, pred_eco, squared=False)
+print(f"Linear Reg → Eco_Sanitation_Index")
+print(f"   R² = {r2_eco:.3f} | RMSE = {rmse_eco:.3f}")
+
+# --- Model 2: Logistic Regression → High Risk (Composite > 75th %) ---
+high_risk = (df['Composite_Risk_Score'] > df['Composite_Risk_Score'].quantile(0.75)).astype(int)
+X_train_c, X_test_c, y_train_c, y_test_c = train_test_split(X, high_risk, test_size=0.2, random_state=42)
+
+logreg_model = LogisticRegression(max_iter=1000)
+logreg_model.fit(X_train_c, y_train_c)
+pred_high = logreg_model.predict(X_test_c)
+prob_high = logreg_model.predict_proba(X_test_c)[:, 1]
+
+auc = roc_auc_score(y_test_c, prob_high)
+prec = precision_score(y_test_c, pred_high)
+rec = recall_score(y_test_c, pred_high)
+print(f"Logistic Reg → High Risk")
+print(f"   ROC-AUC = {auc:.3f} | Precision = {prec:.3f} | Recall = {rec:.3f}")
+
+# --- Model 3: Decision Tree → Health_Vulnerability_Score ---
+y_vuln = df['Health_Vulnerability_Score']
+X_train_v, X_test_v, y_train_v, y_test_v = train_test_split(X, y_vuln, test_size=0.2, random_state=42)
+
+dt_model = DecisionTreeRegressor(max_depth=6, random_state=42)
+dt_model.fit(X_train_v, y_train_v)
+pred_vuln = dt_model.predict(X_test_v)
+
+r2_vuln = r2_score(y_test_v, pred_vuln)
+print(f"Decision Tree → Health_Vulnerability_Score")
+print(f"   R² = {r2_vuln:.3f}\n")
+
+
+# =======================================================
+# PHASE 4: Simulation, Counterfactual Prediction & Health Strategy
+# Execution: 5
+# =======================================================
+
+print("PHASE 4: 2030 COUNTERFACTUAL SIMULATION\n" + "-"*60)
+
+# --- Q1: 2030 Scenario ---
+sim_2030 = df[df['Year'] == 2025].copy()
+
+# Apply policy changes
+sim_2030['Access_to_Clean_Water'] *= 1.15   # +15%
+sim_2030['Sanitation_Coverage'] *= 1.25    # +25%
+sim_2030['Contaminant_Level'] *= 0.90      # –10%
+
+# Recalculate engineered features
+sim_2030['Water_Stress_Index'] = (sim_2030['Contaminant_Level'] + sim_2030['Nitrate_Level'] + sim_2030['Lead_Concentration']) / (sim_2030['Dissolved_Oxygen'] + 1e-6)
+sim_2030['Eco_Sanitation_Index'] = (sim_2030['Access_to_Clean_Water'] * sim_2030['Sanitation_Coverage']) / (1 + sim_2030['Turbidity'])
+sim_2030['Health_Vulnerability_Score'] = (sim_2030['Diarrheal_Cases'] + sim_2030['Cholera_Cases'] + sim_2030['Typhoid_Cases']) / (sim_2030['Healthcare_Access_Index'] + 1)
+sim_2030['Composite_Risk_Score'] = sim_2030['Water_Stress_Index'] + sim_2030['Health_Vulnerability_Score'] - sim_2030['Eco_Sanitation_Index']
+
+# Predict using trained models
+X_sim = sim_2030[selected_features]
+sim_2030['Pred_Eco_2030'] = lr_model.predict(X_sim)
+sim_2030['Pred_High_Risk_Prob'] = logreg_model.predict_proba(X_sim)[:, 1]
+sim_2030['Pred_Vuln_2030'] = dt_model.predict(X_sim)
+
+# Results
+print("Q1: 2030 Predictions (Sample):")
+print(sim_2030[['Country','Region','Pred_High_Risk_Prob','Pred_Vuln_2030']].head(3))
+
+high_risk_2030 = sim_2030[sim_2030['Pred_High_Risk_Prob'] > 0.7]
+print(f"\nALERT: {len(high_risk_2030)} countries remain at HIGH RISK in 2030")
+
+# Final Policy
+print("\n" + "="*60)
+print("HEALTH STRATEGY 2030")
+print("="*60)
+print("1. $2B investment in wastewater treatment plants")
+print("2. Enforce 10% reduction in industrial contaminant discharge")
+print("3. Expand WASH programs in", high_risk_2030['Region'].mode()[0] if not high_risk_2030.empty else "all regions")
+print("4. Deploy GWHA AI dashboard for real-time monitoring")
+print("="*60)
